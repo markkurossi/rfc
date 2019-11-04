@@ -27,6 +27,13 @@ var (
 	RFCs = make(map[string]*RFC)
 )
 
+type Type int
+
+const (
+	Updated Type = iota
+	Obsoleted
+)
+
 type RFC struct {
 	Number    string
 	Title     string
@@ -44,6 +51,7 @@ func (rfc *RFC) String() string {
 func main() {
 	index := flag.String("i", "rfc-index.txt", "RFC index file")
 	traverse := flag.String("t", "", "RFC number to traverse")
+	graph := flag.Int("g", 0, "Print RFC graphs with size >= limit")
 	flag.Parse()
 
 	file, err := os.Open(*index)
@@ -76,6 +84,9 @@ func main() {
 	// TLS: 4346
 	if len(*traverse) > 0 {
 		printTree(*traverse)
+	}
+	if *graph > 0 {
+		printGraph(*graph)
 	}
 }
 
@@ -160,4 +171,83 @@ func traverse(id string, seen map[string]*RFC) {
 	for _, r := range rfc.Backwards {
 		traverse(r, seen)
 	}
+}
+
+func printGraph(size int) {
+	processed := make(map[string]*RFC)
+
+	fmt.Printf("digraph rfc {\n")
+
+	for id, _ := range RFCs {
+		count, leader := countGraph(id, processed)
+
+		if count >= size {
+			fmt.Printf("// Graph %s\t%d\t%s\n",
+				leader.Number, count, leader.Title)
+			print(id, processed)
+		}
+	}
+	fmt.Printf("}\n")
+}
+
+func print(id string, processed map[string]*RFC) bool {
+	_, ok := processed[id]
+	if ok {
+		return false
+	}
+	rfc, ok := RFCs[id]
+	if !ok {
+		panic(fmt.Sprintf("Unknown RFC %s", id))
+	}
+	processed[id] = rfc
+
+	for _, r := range rfc.Forwards {
+		if print(r, processed) {
+			fmt.Printf("\t%s -> %s;\n", id, r)
+		}
+	}
+	for _, r := range rfc.Backwards {
+		if print(r, processed) {
+			fmt.Printf("\t%s -> %s;\n", id, r)
+		}
+	}
+	return true
+}
+
+func countGraph(id string, processed map[string]*RFC) (cnt int, leader *RFC) {
+	graph := make(map[string]*RFC)
+	cnt = count(id, graph, processed)
+	if cnt > 0 {
+		for _, rfc := range graph {
+			if leader == nil || leader.Number > rfc.Number {
+				leader = rfc
+			}
+		}
+	}
+	return
+}
+
+func count(id string, graph, processed map[string]*RFC) int {
+	_, ok := processed[id]
+	if ok {
+		return 0
+	}
+	_, ok = graph[id]
+	if ok {
+		return 0
+	}
+	rfc, ok := RFCs[id]
+	if !ok {
+		panic(fmt.Sprintf("Unknown RFC %s", id))
+	}
+	graph[id] = rfc
+
+	var c = 1
+	for _, r := range rfc.Forwards {
+		c += count(r, graph, processed)
+	}
+	for _, r := range rfc.Backwards {
+		c += count(r, graph, processed)
+	}
+	return c
 }
