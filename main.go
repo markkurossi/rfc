@@ -23,10 +23,19 @@ var (
 	reParams   = regexp.MustCompilePOSIX(`[[:space:]]*\(([^\)]+)\)(.*)`)
 	reForward  = regexp.MustCompilePOSIX(`(Obsoleted|Updated) by (.*)`)
 	reBackward = regexp.MustCompilePOSIX(`(Obsoletes|Updates) (.*)`)
+	reStatus   = regexp.MustCompilePOSIX(`Status:[[:space:]]*(.*)`)
 	reRef      = regexp.MustCompilePOSIX(`RFC([[:digit:]]+)(.*)`)
 
 	RFCs = make(map[string]*RFC)
 )
+
+func GetRFC(id string) *RFC {
+	rfc, ok := RFCs[id]
+	if !ok {
+		panic(fmt.Sprintf("Unknown RFC %s", id))
+	}
+	return rfc
+}
 
 type Type int
 
@@ -52,7 +61,8 @@ func MakeType(val string) Type {
 }
 
 const (
-	Updated Type = iota
+	Current Type = iota
+	Updated
 	Obsoleted
 )
 
@@ -66,14 +76,63 @@ func (e Edge) ID() string {
 	return fmt.Sprintf("%s:%s:%d", e.From, e.To, e.Type)
 }
 
+type Status int
+
+const (
+	Unknown Status = iota
+	Historic
+	Experimental
+	Informational
+	DraftStandard
+	ProposedStandard
+	InternetStandard
+	BestCurrentPractice
+)
+
+var Statuses = map[string]Status{
+	"UNKNOWN":               Unknown,
+	"HISTORIC":              Historic,
+	"EXPERIMENTAL":          Experimental,
+	"INFORMATIONAL":         Informational,
+	"DRAFT STANDARD":        DraftStandard,
+	"PROPOSED STANDARD":     ProposedStandard,
+	"INTERNET STANDARD":     InternetStandard,
+	"BEST CURRENT PRACTICE": BestCurrentPractice,
+}
+
+func GetStatus(val string) Status {
+	status, ok := Statuses[val]
+	if ok {
+		return status
+	}
+	panic(fmt.Sprintf("Unknown status %s", val))
+}
+
 type RFC struct {
 	Number    string
 	Title     string
 	Authors   string
 	Date      string
+	Type      Type
+	Status    Status
 	Forwards  map[string]Type
 	Backwards map[string]Type
 	Params    []string
+}
+
+func (rfc *RFC) SetTypes() {
+	for _, t := range rfc.Forwards {
+		rfc.SetType(t)
+	}
+	for id, t := range rfc.Backwards {
+		GetRFC(id).SetType(t)
+	}
+}
+
+func (rfc *RFC) SetType(t Type) {
+	if t > rfc.Type {
+		rfc.Type = t
+	}
 }
 
 func (rfc *RFC) String() string {
@@ -103,13 +162,17 @@ func main() {
 			if len(l) == 0 {
 				rfc := parseRFC(line)
 				if rfc != nil {
-					// fmt.Printf("%s\n", rfc)
 					RFCs[rfc.Number] = rfc
 				}
 				break
 			}
 			line += " " + l
 		}
+	}
+
+	// Set RFC types.
+	for _, rfc := range RFCs {
+		rfc.SetTypes()
 	}
 
 	// SSH: 4250
@@ -125,7 +188,6 @@ func main() {
 func parseRFC(line string) *RFC {
 	m := reRFC.FindStringSubmatch(line)
 	if m == nil {
-		// fmt.Printf("Invalid: %s\n", line)
 		return nil
 	}
 	parts := strings.Split(m[2], ". ")
@@ -138,8 +200,6 @@ func parseRFC(line string) *RFC {
 		Forwards:  make(map[string]Type),
 		Backwards: make(map[string]Type),
 	}
-
-	// fmt.Printf("%s %s\n - %s\n", m[1], m[2], m[3])
 
 	params := m[3]
 	for {
@@ -158,8 +218,12 @@ func parseRFC(line string) *RFC {
 				rfc.Backwards[ref] = MakeType(mb[1])
 			}
 		} else {
-			rfc.Params = append(rfc.Params, m[1])
-			// fmt.Printf(" -  %s\n", m[1])
+			ms := reStatus.FindStringSubmatch(m[1])
+			if ms != nil {
+				rfc.Status = GetStatus(ms[1])
+			} else {
+				rfc.Params = append(rfc.Params, m[1])
+			}
 		}
 
 		params = m[2]
@@ -191,13 +255,7 @@ func traverse(id string, seen map[string]*RFC) {
 	if ok {
 		return
 	}
-	rfc, ok := RFCs[id]
-	if !ok {
-		for k, _ := range RFCs {
-			fmt.Printf("Key: %s\n", k)
-		}
-		panic(fmt.Sprintf("Unknown RFC %s", id))
-	}
+	rfc := GetRFC(id)
 	seen[id] = rfc
 	fmt.Printf("%s\n", rfc)
 
@@ -223,6 +281,40 @@ func printGraph(size int) {
 				leader.Number, count, leader.Title)
 			print(leader.Number, processed, edgeMap)
 		}
+	}
+
+	var current []*RFC
+	var updated []*RFC
+	var obsoleted []*RFC
+
+	for _, rfc := range RFCs {
+		_, ok := processed[rfc.Number]
+		if !ok {
+			continue
+		}
+		switch rfc.Type {
+		case Current:
+			current = append(current, rfc)
+		case Updated:
+			updated = append(updated, rfc)
+		case Obsoleted:
+			obsoleted = append(obsoleted, rfc)
+		}
+	}
+
+	fmt.Printf("\tnode [shape=ellipse, style=bold]\n")
+	for _, rfc := range current {
+		fmt.Printf("\t%s;\n", rfc.Number)
+	}
+
+	fmt.Printf("\tnode [shape=ellipse, style=solid]\n")
+	for _, rfc := range updated {
+		fmt.Printf("\t%s;\n", rfc.Number)
+	}
+
+	fmt.Printf("\tnode [shape=ellipse, style=dotted]\n")
+	for _, rfc := range obsoleted {
+		fmt.Printf("\t%s;\n", rfc.Number)
 	}
 
 	var edges []Edge
@@ -252,10 +344,7 @@ func print(id string, processed map[string]*RFC, edges map[string]Edge) {
 	if ok {
 		return
 	}
-	rfc, ok := RFCs[id]
-	if !ok {
-		panic(fmt.Sprintf("Unknown RFC %s", id))
-	}
+	rfc := GetRFC(id)
 	processed[id] = rfc
 
 	for r, t := range rfc.Forwards {
@@ -300,10 +389,7 @@ func count(id string, graph, processed map[string]*RFC) int {
 	if ok {
 		return 0
 	}
-	rfc, ok := RFCs[id]
-	if !ok {
-		panic(fmt.Sprintf("Unknown RFC %s", id))
-	}
+	rfc := GetRFC(id)
 	graph[id] = rfc
 
 	var c = 1
