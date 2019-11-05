@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -29,18 +30,49 @@ var (
 
 type Type int
 
+func (t Type) Edge() string {
+	switch t {
+	case Updated:
+		return ""
+	case Obsoleted:
+		return " [style=dashed]"
+	}
+	panic(fmt.Sprintf("Unknown Type %s", t))
+}
+
+func MakeType(val string) Type {
+	switch val {
+	case "Updated", "Updates":
+		return Updated
+	case "Obsoleted", "Obsoletes":
+		return Obsoleted
+	default:
+		panic(fmt.Sprintf("Invalid type %s", val))
+	}
+}
+
 const (
 	Updated Type = iota
 	Obsoleted
 )
+
+type Edge struct {
+	From string
+	To   string
+	Type Type
+}
+
+func (e Edge) ID() string {
+	return fmt.Sprintf("%s:%s:%d", e.From, e.To, e.Type)
+}
 
 type RFC struct {
 	Number    string
 	Title     string
 	Authors   string
 	Date      string
-	Forwards  []string
-	Backwards []string
+	Forwards  map[string]Type
+	Backwards map[string]Type
 	Params    []string
 }
 
@@ -99,10 +131,12 @@ func parseRFC(line string) *RFC {
 	parts := strings.Split(m[2], ". ")
 
 	rfc := &RFC{
-		Number:  m[1],
-		Title:   parts[0],
-		Authors: strings.Join(parts[1:len(parts)-1], ". "),
-		Date:    parts[len(parts)-1],
+		Number:    m[1],
+		Title:     parts[0],
+		Authors:   strings.Join(parts[1:len(parts)-1], ". "),
+		Date:      parts[len(parts)-1],
+		Forwards:  make(map[string]Type),
+		Backwards: make(map[string]Type),
 	}
 
 	// fmt.Printf("%s %s\n - %s\n", m[1], m[2], m[3])
@@ -116,11 +150,13 @@ func parseRFC(line string) *RFC {
 		mf := reForward.FindStringSubmatch(m[1])
 		mb := reBackward.FindStringSubmatch(m[1])
 		if mf != nil {
-			rfc.Forwards = append(rfc.Forwards, parseRefs(mf[2])...)
-			// fmt.Printf(" -> %s\n", strings.Join(parseRefs(mf[2]), " "))
+			for _, ref := range parseRefs(mf[2]) {
+				rfc.Forwards[ref] = MakeType(mf[1])
+			}
 		} else if mb != nil {
-			rfc.Backwards = append(rfc.Backwards, parseRefs(mb[2])...)
-			// fmt.Printf(" <- %s\n", strings.Join(parseRefs(mb[2]), " "))
+			for _, ref := range parseRefs(mb[2]) {
+				rfc.Backwards[ref] = MakeType(mb[1])
+			}
 		} else {
 			rfc.Params = append(rfc.Params, m[1])
 			// fmt.Printf(" -  %s\n", m[1])
@@ -165,16 +201,17 @@ func traverse(id string, seen map[string]*RFC) {
 	seen[id] = rfc
 	fmt.Printf("%s\n", rfc)
 
-	for _, r := range rfc.Forwards {
+	for r, _ := range rfc.Forwards {
 		traverse(r, seen)
 	}
-	for _, r := range rfc.Backwards {
+	for r, _ := range rfc.Backwards {
 		traverse(r, seen)
 	}
 }
 
 func printGraph(size int) {
 	processed := make(map[string]*RFC)
+	edgeMap := make(map[string]Edge)
 
 	fmt.Printf("digraph rfc {\n")
 
@@ -184,16 +221,36 @@ func printGraph(size int) {
 		if count >= size {
 			fmt.Printf("// Graph %s\t%d\t%s\n",
 				leader.Number, count, leader.Title)
-			print(id, processed)
+			print(leader.Number, processed, edgeMap)
 		}
 	}
+
+	var edges []Edge
+	for _, edge := range edgeMap {
+		edges = append(edges, edge)
+	}
+
+	sort.SliceStable(edges, func(i, j int) bool {
+		if edges[i].From < edges[j].From {
+			return true
+		}
+		if edges[i].From > edges[j].From {
+			return false
+		}
+		return edges[i].To < edges[j].To
+	})
+
+	for _, edge := range edges {
+		fmt.Printf("\t%s -> %s%s;\n", edge.From, edge.To, edge.Type.Edge())
+	}
+
 	fmt.Printf("}\n")
 }
 
-func print(id string, processed map[string]*RFC) bool {
+func print(id string, processed map[string]*RFC, edges map[string]Edge) {
 	_, ok := processed[id]
 	if ok {
-		return false
+		return
 	}
 	rfc, ok := RFCs[id]
 	if !ok {
@@ -201,17 +258,24 @@ func print(id string, processed map[string]*RFC) bool {
 	}
 	processed[id] = rfc
 
-	for _, r := range rfc.Forwards {
-		if print(r, processed) {
-			fmt.Printf("\t%s -> %s;\n", id, r)
+	for r, t := range rfc.Forwards {
+		edge := Edge{
+			From: id,
+			To:   r,
+			Type: t,
 		}
+		edges[edge.ID()] = edge
+		print(r, processed, edges)
 	}
-	for _, r := range rfc.Backwards {
-		if print(r, processed) {
-			fmt.Printf("\t%s -> %s;\n", id, r)
+	for r, t := range rfc.Backwards {
+		edge := Edge{
+			From: r,
+			To:   id,
+			Type: t,
 		}
+		edges[edge.ID()] = edge
+		print(r, processed, edges)
 	}
-	return true
 }
 
 func countGraph(id string, processed map[string]*RFC) (cnt int, leader *RFC) {
@@ -243,10 +307,10 @@ func count(id string, graph, processed map[string]*RFC) int {
 	graph[id] = rfc
 
 	var c = 1
-	for _, r := range rfc.Forwards {
+	for r, _ := range rfc.Forwards {
 		c += count(r, graph, processed)
 	}
-	for _, r := range rfc.Backwards {
+	for r, _ := range rfc.Backwards {
 		c += count(r, graph, processed)
 	}
 	return c
