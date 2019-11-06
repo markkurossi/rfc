@@ -49,6 +49,20 @@ func (t Type) Edge() string {
 	panic(fmt.Sprintf("Unknown Type %s", t))
 }
 
+func (t Type) Node() string {
+	switch t {
+	case Current:
+		return "style=solid fontname=\"Helvetica-Bold\""
+
+	case Updated:
+		return "style=solid fontname=\"Helvetica\""
+
+	case Obsoleted:
+		return "style=dotted fontname=\"Helvetica-Narrow\""
+	}
+	panic(fmt.Sprintf("Unknown type %s", t))
+}
+
 func MakeType(val string) Type {
 	switch val {
 	case "Updated", "Updates":
@@ -77,6 +91,25 @@ func (e Edge) ID() string {
 }
 
 type Status int
+
+var statusNode = map[Status]string{
+	Unknown:             "none",
+	Historic:            "cylinder",
+	Experimental:        "parallelogram",
+	Informational:       "house",
+	DraftStandard:       "polygon",
+	ProposedStandard:    "oval",
+	InternetStandard:    "box",
+	BestCurrentPractice: "trapezium",
+}
+
+func (s Status) Node() string {
+	node, ok := statusNode[s]
+	if ok {
+		return fmt.Sprintf("shape=%s", node)
+	}
+	panic(fmt.Sprintf("Unknown status %v", s))
+}
 
 const (
 	Unknown Status = iota
@@ -283,38 +316,23 @@ func printGraph(size int) {
 		}
 	}
 
-	var current []*RFC
-	var updated []*RFC
-	var obsoleted []*RFC
+	var nodes [Obsoleted + 1][BestCurrentPractice + 1][]*RFC
 
 	for _, rfc := range RFCs {
 		_, ok := processed[rfc.Number]
 		if !ok {
 			continue
 		}
-		switch rfc.Type {
-		case Current:
-			current = append(current, rfc)
-		case Updated:
-			updated = append(updated, rfc)
-		case Obsoleted:
-			obsoleted = append(obsoleted, rfc)
+		nodes[rfc.Type][rfc.Status] = append(nodes[rfc.Type][rfc.Status], rfc)
+	}
+
+	for t, tarr := range nodes {
+		for s, arr := range tarr {
+			fmt.Printf("\tnode [%s %s]\n", Status(s).Node(), Type(t).Node())
+			for _, rfc := range arr {
+				fmt.Printf("\t%s;\n", rfc.Number)
+			}
 		}
-	}
-
-	fmt.Printf("\tnode [shape=ellipse, style=bold]\n")
-	for _, rfc := range current {
-		fmt.Printf("\t%s;\n", rfc.Number)
-	}
-
-	fmt.Printf("\tnode [shape=ellipse, style=solid]\n")
-	for _, rfc := range updated {
-		fmt.Printf("\t%s;\n", rfc.Number)
-	}
-
-	fmt.Printf("\tnode [shape=ellipse, style=dotted]\n")
-	for _, rfc := range obsoleted {
-		fmt.Printf("\t%s;\n", rfc.Number)
 	}
 
 	var edges []Edge
