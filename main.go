@@ -15,6 +15,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -26,7 +27,10 @@ var (
 	reStatus   = regexp.MustCompilePOSIX(`Status:[[:space:]]*(.*)`)
 	reRef      = regexp.MustCompilePOSIX(`RFC([[:digit:]]+)(.*)`)
 
-	RFCs = make(map[string]*RFC)
+	RFCs      = make(map[string]*RFC)
+	processed = make(map[string]*RFC)
+	edgeMap   = make(map[string]Edge)
+	graphs    []Graph
 )
 
 func GetRFC(id string) *RFC {
@@ -103,12 +107,31 @@ var statusNode = map[Status]string{
 	BestCurrentPractice: "trapezium",
 }
 
+var statusName = map[Status]string{
+	Unknown:             "Unknown",
+	Historic:            "Historic",
+	Experimental:        "Experimental",
+	Informational:       "Informational",
+	DraftStandard:       "DraftStandard",
+	ProposedStandard:    "ProposedStandard",
+	InternetStandard:    "InternetStandard",
+	BestCurrentPractice: "BestCurrentPractice",
+}
+
 func (s Status) Node() string {
 	node, ok := statusNode[s]
 	if ok {
 		return fmt.Sprintf("shape=%s", node)
 	}
 	panic(fmt.Sprintf("Unknown status %v", s))
+}
+
+func (s Status) String() string {
+	name, ok := statusName[s]
+	if ok {
+		return name
+	}
+	return fmt.Sprintf("Status%d", s)
 }
 
 const (
@@ -168,14 +191,35 @@ func (rfc *RFC) SetType(t Type) {
 	}
 }
 
+func (rfc *RFC) Year() (int, error) {
+	parts := strings.Split(rfc.Date, " ")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("Invalid RFC Date: %s", rfc.Date)
+	}
+	i, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, err
+	}
+	return i, nil
+}
+
 func (rfc *RFC) String() string {
 	return fmt.Sprintf("%s;%s", rfc.Number, rfc.Title)
+}
+
+type Graph struct {
+	Leader *RFC
+	Size   int
 }
 
 func main() {
 	index := flag.String("i", "rfc-index.txt", "RFC index file")
 	traverse := flag.String("t", "", "RFC number to traverse")
-	graph := flag.Int("g", 0, "Print RFC graphs with size >= limit")
+	size := flag.Int("s", 0, "The minimum graph size")
+	list := flag.Bool("l", false, "List graphs")
+	graph := flag.Bool("g", false, "Print RFC graphs")
+	root := flag.String("r", "", "Graph roots, default to all > size")
+	timeline := flag.Bool("h", false, "Print timeline and legend")
 	flag.Parse()
 
 	file, err := os.Open(*index)
@@ -208,13 +252,36 @@ func main() {
 		rfc.SetTypes()
 	}
 
+	var rfcs []*RFC
+	if len(*root) > 0 {
+		numbers := strings.Split(*root, ",")
+		for _, num := range numbers {
+			rfcs = append(rfcs, GetRFC(num))
+		}
+	} else {
+		for _, rfc := range RFCs {
+			rfcs = append(rfcs, rfc)
+		}
+	}
+
+	// Find graphs larger than *size.
+	findGraphs(rfcs, *size)
+
 	// SSH: 4250
 	// TLS: 4346
 	if len(*traverse) > 0 {
 		printTree(*traverse)
 	}
-	if *graph > 0 {
-		printGraph(*graph)
+	if *list {
+		sort.SliceStable(graphs, func(i, j int) bool {
+			return graphs[i].Leader.Number < graphs[j].Leader.Number
+		})
+		for _, g := range graphs {
+			fmt.Printf("%s\t%d\t%s\n", g.Leader.Number, g.Size, g.Leader.Title)
+		}
+	}
+	if *graph {
+		printGraph(*timeline)
 	}
 }
 
@@ -300,30 +367,54 @@ func traverse(id string, seen map[string]*RFC) {
 	}
 }
 
-func printGraph(size int) {
-	processed := make(map[string]*RFC)
-	edgeMap := make(map[string]Edge)
+func findGraphs(rfcs []*RFC, size int) {
+	for _, id := range rfcs {
+		count, leader := countGraph(id.Number, processed)
 
-	fmt.Printf("digraph rfc {\n")
-
-	for id, _ := range RFCs {
-		count, leader := countGraph(id, processed)
-
-		if count >= size {
-			fmt.Printf("// Graph %s\t%d\t%s\n",
-				leader.Number, count, leader.Title)
-			print(leader.Number, processed, edgeMap)
+		if count >= size && count > 0 {
+			graphs = append(graphs, Graph{
+				Leader: leader,
+				Size:   count,
+			})
+			collectEdges(leader.Number, processed, edgeMap)
 		}
 	}
+}
+
+func printGraph(timeline bool) {
+	fmt.Printf("digraph rfc {\n")
 
 	var nodes [Obsoleted + 1][BestCurrentPractice + 1][]*RFC
+	var from, to int
+	var ranks = make(map[int][]*RFC)
 
 	for _, rfc := range RFCs {
 		_, ok := processed[rfc.Number]
 		if !ok {
 			continue
 		}
+		year, err := rfc.Year()
+		if err != nil {
+			panic(err.Error())
+		}
+		if from == 0 || year < from {
+			from = year
+		}
+		if to == 0 || year > to {
+			to = year
+		}
+		ranks[year] = append(ranks[year], rfc)
+
 		nodes[rfc.Type][rfc.Status] = append(nodes[rfc.Type][rfc.Status], rfc)
+	}
+
+	if timeline {
+		fmt.Printf("// %d-%d\n", from, to)
+		fmt.Printf("\tnode [shape=plaintext];\n\t%d", from)
+		for i := from + 1; i <= to; i++ {
+			fmt.Printf(" -> %d", i)
+		}
+		fmt.Printf(";\n\t%d -> Legend [style=invis];\n", to)
 	}
 
 	for t, tarr := range nodes {
@@ -333,6 +424,30 @@ func printGraph(size int) {
 				fmt.Printf("\t%s;\n", rfc.Number)
 			}
 		}
+	}
+
+	if timeline {
+		for i := from; i <= to; i++ {
+			arr, ok := ranks[i]
+			if !ok {
+				continue
+			}
+			fmt.Printf("\t{rank=same %d", i)
+			for _, rfc := range arr {
+				fmt.Printf(" %s", rfc.Number)
+			}
+			fmt.Printf("}\n")
+		}
+
+		for status, _ := range statusName {
+			fmt.Printf("\tnode [%s style=solid];\n", status.Node())
+			fmt.Printf("\t%s;\n", status)
+		}
+		fmt.Printf("\t{rank=same Legend")
+		for status, _ := range statusName {
+			fmt.Printf(" %s", status)
+		}
+		fmt.Printf("}\n")
 	}
 
 	var edges []Edge
@@ -357,7 +472,7 @@ func printGraph(size int) {
 	fmt.Printf("}\n")
 }
 
-func print(id string, processed map[string]*RFC, edges map[string]Edge) {
+func collectEdges(id string, processed map[string]*RFC, edges map[string]Edge) {
 	_, ok := processed[id]
 	if ok {
 		return
@@ -372,7 +487,7 @@ func print(id string, processed map[string]*RFC, edges map[string]Edge) {
 			Type: t,
 		}
 		edges[edge.ID()] = edge
-		print(r, processed, edges)
+		collectEdges(r, processed, edges)
 	}
 	for r, t := range rfc.Backwards {
 		edge := Edge{
@@ -381,7 +496,7 @@ func print(id string, processed map[string]*RFC, edges map[string]Edge) {
 			Type: t,
 		}
 		edges[edge.ID()] = edge
-		print(r, processed, edges)
+		collectEdges(r, processed, edges)
 	}
 }
 
