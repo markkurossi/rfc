@@ -50,7 +50,7 @@ func (t Type) Edge() string {
 	case Obsoleted:
 		return " [style=dashed]"
 	}
-	panic(fmt.Sprintf("Unknown Type %s", t))
+	panic(fmt.Sprintf("Unknown Type %d", t))
 }
 
 func (t Type) Node() string {
@@ -64,7 +64,7 @@ func (t Type) Node() string {
 	case Obsoleted:
 		return "style=dotted fontname=\"Helvetica-Narrow\""
 	}
-	panic(fmt.Sprintf("Unknown type %s", t))
+	panic(fmt.Sprintf("Unknown type %d", t))
 }
 
 func MakeType(val string) Type {
